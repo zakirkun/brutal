@@ -1,5 +1,7 @@
 # 🚀 Brutal Load Tester
 
+![Screenshot](./assets/screenshot.png)
+
 A powerful, blazingly fast HTTP load testing tool with comprehensive analytics and a modern CLI interface powered by Cobra.
 
 ![Build Status](https://github.com/zakirkun/brutal/workflows/Continuous%20Integration/badge.svg)
