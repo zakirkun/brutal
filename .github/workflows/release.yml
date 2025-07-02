@@ -163,10 +163,14 @@ jobs:
         cp ./dist/brutal-linux-amd64 brutal-deb/usr/local/bin/brutal
         chmod +x brutal-deb/usr/local/bin/brutal
         
+        # Remove 'v' prefix from version for DEB package compliance
+        VERSION=${{ github.ref_name }}
+        VERSION=${VERSION#v}
+        
         # Create control file
         cat > brutal-deb/DEBIAN/control << EOF
         Package: brutal
-        Version: ${{ github.ref_name }}
+        Version: ${VERSION}
         Section: utils
         Priority: optional
         Architecture: amd64
@@ -186,17 +190,21 @@ jobs:
         License: MIT
         EOF
         
-        # Build package
-        dpkg-deb --build brutal-deb brutal-${{ github.ref_name }}-amd64.deb
+        # Build package with version without 'v' prefix
+        dpkg-deb --build brutal-deb brutal-${VERSION}-amd64.deb
 
     - name: Create RPM package
       run: |
         mkdir -p ~/rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
         
+        # Remove 'v' prefix from version for RPM package compliance
+        VERSION=${{ github.ref_name }}
+        VERSION=${VERSION#v}
+        
         # Create spec file
         cat > ~/rpmbuild/SPECS/brutal.spec << EOF
         Name: brutal
-        Version: ${{ github.ref_name }}
+        Version: ${VERSION}
         Release: 1%{?dist}
         Summary: Brutal Load Tester
         License: MIT
@@ -218,8 +226,8 @@ jobs:
         /usr/local/bin/brutal
         
         %changelog
-        * $(date +'%a %b %d %Y') ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com> - ${{ github.ref_name }}-1
-        - Release ${{ github.ref_name }}
+        * $(date +'%a %b %d %Y') ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com> - ${VERSION}-1
+        - Release ${VERSION}
         EOF
         
         # Build RPM
