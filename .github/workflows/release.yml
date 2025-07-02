@@ -1,0 +1,386 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows
+            arch: amd64
+            ext: .exe
+          - os: windows
+            arch: arm64
+            ext: .exe
+          - os: linux
+            arch: amd64
+            ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
+          - os: darwin
+            arch: amd64
+            ext: ""
+          - os: darwin
+            arch: arm64
+            ext: ""
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Get dependencies
+      run: go mod download
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0
+      run: |
+        go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o brutal-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }} .
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: brutal-${{ matrix.os }}-${{ matrix.arch }}
+        path: brutal-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+
+  create-windows-installer:
+    needs: build
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Windows AMD64 artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: brutal-windows-amd64
+        path: ./dist
+
+    - name: Create installer script
+      run: |
+        @"
+        @echo off
+        echo Installing Brutal Load Tester...
+        
+        REM Create installation directory
+        if not exist "%PROGRAMFILES%\Brutal" mkdir "%PROGRAMFILES%\Brutal"
+        
+        REM Copy executable
+        copy brutal-windows-amd64.exe "%PROGRAMFILES%\Brutal\brutal.exe"
+        
+        REM Add to PATH
+        for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "currentpath=%%b"
+        echo %currentpath% | find /i "%PROGRAMFILES%\Brutal" >nul
+        if errorlevel 1 (
+            setx /M PATH "%currentpath%;%PROGRAMFILES%\Brutal"
+            echo Added Brutal to system PATH
+        )
+        
+        echo Installation completed successfully!
+        echo You can now use 'brutal' command from anywhere in the command prompt.
+        pause
+        "@ | Out-File -FilePath ./dist/install.bat -Encoding ASCII
+
+    - name: Create uninstaller script
+      run: |
+        @"
+        @echo off
+        echo Uninstalling Brutal Load Tester...
+        
+        REM Remove from PATH
+        for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "currentpath=%%b"
+        set "newpath="
+        for %%i in ("%currentpath:;=" "%") do (
+            if /i not "%%~i"=="%PROGRAMFILES%\Brutal" (
+                if defined newpath (
+                    set "newpath=!newpath!;%%~i"
+                ) else (
+                    set "newpath=%%~i"
+                )
+            )
+        )
+        setx /M PATH "%newpath%"
+        
+        REM Remove installation directory
+        rmdir /s /q "%PROGRAMFILES%\Brutal"
+        
+        echo Uninstallation completed successfully!
+        pause
+        "@ | Out-File -FilePath ./dist/uninstall.bat -Encoding ASCII
+
+    - name: Create Windows installer package
+      run: |
+        Compress-Archive -Path ./dist/* -DestinationPath brutal-windows-installer.zip
+
+    - name: Upload Windows installer
+      uses: actions/upload-artifact@v3
+      with:
+        name: brutal-windows-installer
+        path: brutal-windows-installer.zip
+
+  create-linux-packages:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Linux AMD64 artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: brutal-linux-amd64
+        path: ./dist
+
+    - name: Install packaging tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y rpm
+
+    - name: Create DEB package
+      run: |
+        mkdir -p brutal-deb/DEBIAN
+        mkdir -p brutal-deb/usr/local/bin
+        mkdir -p brutal-deb/usr/share/doc/brutal
+        
+        # Copy binary
+        cp ./dist/brutal-linux-amd64 brutal-deb/usr/local/bin/brutal
+        chmod +x brutal-deb/usr/local/bin/brutal
+        
+        # Create control file
+        cat > brutal-deb/DEBIAN/control << EOF
+        Package: brutal
+        Version: ${{ github.ref_name }}
+        Section: utils
+        Priority: optional
+        Architecture: amd64
+        Maintainer: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+        Description: Brutal Load Tester
+         A powerful command-line load testing tool with beautiful TUI
+        EOF
+        
+        # Create copyright file
+        cat > brutal-deb/usr/share/doc/brutal/copyright << EOF
+        Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+        Upstream-Name: brutal
+        Source: ${{ github.server_url }}/${{ github.repository }}
+        
+        Files: *
+        Copyright: ${{ github.actor }}
+        License: MIT
+        EOF
+        
+        # Build package
+        dpkg-deb --build brutal-deb brutal-${{ github.ref_name }}-amd64.deb
+
+    - name: Create RPM package
+      run: |
+        mkdir -p ~/rpmbuild/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
+        
+        # Create spec file
+        cat > ~/rpmbuild/SPECS/brutal.spec << EOF
+        Name: brutal
+        Version: ${{ github.ref_name }}
+        Release: 1%{?dist}
+        Summary: Brutal Load Tester
+        License: MIT
+        Source0: %{name}-%{version}.tar.gz
+        
+        %description
+        A powerful command-line load testing tool with beautiful TUI
+        
+        %prep
+        
+        %build
+        
+        %install
+        mkdir -p %{buildroot}/usr/local/bin
+        cp ${{ github.workspace }}/dist/brutal-linux-amd64 %{buildroot}/usr/local/bin/brutal
+        chmod +x %{buildroot}/usr/local/bin/brutal
+        
+        %files
+        /usr/local/bin/brutal
+        
+        %changelog
+        * $(date +'%a %b %d %Y') ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com> - ${{ github.ref_name }}-1
+        - Release ${{ github.ref_name }}
+        EOF
+        
+        # Build RPM
+        rpmbuild -ba ~/rpmbuild/SPECS/brutal.spec
+        cp ~/rpmbuild/RPMS/x86_64/brutal-*.rpm ./
+
+    - name: Upload DEB package
+      uses: actions/upload-artifact@v3
+      with:
+        name: brutal-deb-package
+        path: brutal-*.deb
+
+    - name: Upload RPM package
+      uses: actions/upload-artifact@v3
+      with:
+        name: brutal-rpm-package
+        path: brutal-*.rpm
+
+  create-macos-installer:
+    needs: build
+    runs-on: macos-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download macOS artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: brutal-darwin-amd64
+        path: ./dist-amd64
+
+    - name: Download macOS ARM64 artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: brutal-darwin-arm64
+        path: ./dist-arm64
+
+    - name: Create universal binary
+      run: |
+        lipo -create ./dist-amd64/brutal-darwin-amd64 ./dist-arm64/brutal-darwin-arm64 -output brutal-universal
+        chmod +x brutal-universal
+
+    - name: Create installation script
+      run: |
+        cat > install.sh << 'EOF'
+        #!/bin/bash
+        echo "Installing Brutal Load Tester..."
+        
+        # Create installation directory
+        sudo mkdir -p /usr/local/bin
+        
+        # Copy executable
+        sudo cp brutal-universal /usr/local/bin/brutal
+        sudo chmod +x /usr/local/bin/brutal
+        
+        # Add to PATH if not already there
+        if ! echo $PATH | grep -q "/usr/local/bin"; then
+            echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zshrc
+            echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.bash_profile
+        fi
+        
+        echo "Installation completed successfully!"
+        echo "You can now use 'brutal' command from anywhere in the terminal."
+        echo "You may need to restart your terminal or run 'source ~/.zshrc' for the PATH changes to take effect."
+        EOF
+        chmod +x install.sh
+
+    - name: Create uninstallation script
+      run: |
+        cat > uninstall.sh << 'EOF'
+        #!/bin/bash
+        echo "Uninstalling Brutal Load Tester..."
+        
+        # Remove executable
+        sudo rm -f /usr/local/bin/brutal
+        
+        echo "Uninstallation completed successfully!"
+        EOF
+        chmod +x uninstall.sh
+
+    - name: Create macOS installer package
+      run: |
+        tar -czf brutal-macos-installer.tar.gz brutal-universal install.sh uninstall.sh
+
+    - name: Upload macOS installer
+      uses: actions/upload-artifact@v3
+      with:
+        name: brutal-macos-installer
+        path: brutal-macos-installer.tar.gz
+
+  release:
+    needs: [build, create-windows-installer, create-linux-packages, create-macos-installer]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Create release notes
+      run: |
+        cat > release_notes.md << EOF
+        ## Brutal Load Tester ${{ github.ref_name }}
+        
+        ### 🚀 Cross-Platform Binaries
+        - **Windows**: \`brutal-windows-amd64.exe\`, \`brutal-windows-arm64.exe\`
+        - **Linux**: \`brutal-linux-amd64\`, \`brutal-linux-arm64\`
+        - **macOS**: \`brutal-darwin-amd64\`, \`brutal-darwin-arm64\`
+        
+        ### 📦 Easy Installation Packages
+        - **Windows Installer**: \`brutal-windows-installer.zip\` (includes install/uninstall scripts)
+        - **Linux DEB**: \`brutal-*.deb\` (for Ubuntu/Debian)
+        - **Linux RPM**: \`brutal-*.rpm\` (for CentOS/RHEL/Fedora)
+        - **macOS Installer**: \`brutal-macos-installer.tar.gz\` (universal binary with scripts)
+        
+        ### 🔧 Installation Instructions
+        
+        #### Windows
+        1. Download \`brutal-windows-installer.zip\`
+        2. Extract and run \`install.bat\` as Administrator
+        3. Use \`brutal\` command from Command Prompt or PowerShell
+        
+        #### Linux (DEB)
+        \`\`\`bash
+        sudo dpkg -i brutal-*.deb
+        \`\`\`
+        
+        #### Linux (RPM)
+        \`\`\`bash
+        sudo rpm -i brutal-*.rpm
+        \`\`\`
+        
+        #### macOS
+        \`\`\`bash
+        tar -xzf brutal-macos-installer.tar.gz
+        ./install.sh
+        \`\`\`
+        
+        #### Manual Installation
+        Download the appropriate binary for your platform and place it in your PATH.
+        EOF
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ github.ref_name }}
+        body_path: release_notes.md
+        files: |
+          brutal-windows-amd64/brutal-windows-amd64.exe
+          brutal-windows-arm64/brutal-windows-arm64.exe
+          brutal-linux-amd64/brutal-linux-amd64
+          brutal-linux-arm64/brutal-linux-arm64
+          brutal-darwin-amd64/brutal-darwin-amd64
+          brutal-darwin-arm64/brutal-darwin-arm64
+          brutal-windows-installer/brutal-windows-installer.zip
+          brutal-deb-package/brutal-*.deb
+          brutal-rpm-package/brutal-*.rpm
+          brutal-macos-installer/brutal-macos-installer.tar.gz
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
