@@ -201,21 +201,23 @@ jobs:
         VERSION=${{ github.ref_name }}
         VERSION=${VERSION#v}
         
-        # Create spec file
+        # Create spec file without source dependency
         cat > ~/rpmbuild/SPECS/brutal.spec << EOF
         Name: brutal
         Version: ${VERSION}
         Release: 1%{?dist}
         Summary: Brutal Load Tester
         License: MIT
-        Source0: %{name}-%{version}.tar.gz
+        BuildArch: x86_64
         
         %description
         A powerful command-line load testing tool with beautiful TUI
         
         %prep
+        # No preparation needed since we're installing a pre-built binary
         
         %build
+        # No build needed since we're installing a pre-built binary
         
         %install
         mkdir -p %{buildroot}/usr/local/bin
@@ -230,8 +232,8 @@ jobs:
         - Release ${VERSION}
         EOF
         
-        # Build RPM
-        rpmbuild -ba ~/rpmbuild/SPECS/brutal.spec
+        # Build RPM without requiring source files
+        rpmbuild -bb ~/rpmbuild/SPECS/brutal.spec
         cp ~/rpmbuild/RPMS/x86_64/brutal-*.rpm ./
 
     - name: Upload DEB package
