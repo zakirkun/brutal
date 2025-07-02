@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -40,6 +41,7 @@ type Result struct {
 	ResponseTime time.Duration
 	ContentSize  int64
 	Error        error
+	Timestamp    time.Time
 }
 
 // Stats holds aggregated statistics
@@ -68,29 +70,37 @@ type LoadTester struct {
 
 // TUI Model for bubble tea
 type model struct {
-	loadTester  *LoadTester
-	progress    progress.Model
-	spinner     spinner.Model
-	state       string
-	completed   int
-	total       int
-	stats       *Stats
-	startTime   time.Time
-	currentTime time.Time
-	liveStats   *LiveStats
-	err         error
+	loadTester       *LoadTester
+	progress         progress.Model
+	spinner          spinner.Model
+	state            string
+	completed        int
+	total            int
+	stats            *Stats
+	startTime        time.Time
+	currentTime      time.Time
+	liveStats        *LiveStats
+	err              error
+	qpsHistory       []float64
+	responseTimeHist []time.Duration
+	updateChan       chan tea.Msg
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 // LiveStats holds real-time statistics during testing
 type LiveStats struct {
-	mu              sync.RWMutex
-	successful      int
-	failed          int
-	totalBytes      int64
-	responseTimes   []time.Duration
-	statusCodes     map[int]int
-	minResponseTime time.Duration
-	maxResponseTime time.Duration
+	mu                 sync.RWMutex
+	successful         int
+	failed             int
+	totalBytes         int64
+	responseTimes      []time.Duration
+	statusCodes        map[int]int
+	minResponseTime    time.Duration
+	maxResponseTime    time.Duration
+	lastSecond         time.Time
+	requestsThisSecond int
+	currentQPS         float64
 }
 
 // Styles for TUI
@@ -117,6 +127,9 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("238")).
 			Padding(1, 2)
+
+	chartStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("82"))
 )
 
 // Messages for bubble tea
@@ -163,7 +176,7 @@ func (lt *LoadTester) makeRequest() Result {
 
 	req, err := http.NewRequest(lt.config.Method, lt.config.URL, body)
 	if err != nil {
-		return Result{Error: err, ResponseTime: time.Since(start)}
+		return Result{Error: err, ResponseTime: time.Since(start), Timestamp: time.Now()}
 	}
 
 	// Add headers
@@ -180,7 +193,7 @@ func (lt *LoadTester) makeRequest() Result {
 	responseTime := time.Since(start)
 
 	if err != nil {
-		return Result{Error: err, ResponseTime: responseTime}
+		return Result{Error: err, ResponseTime: responseTime, Timestamp: time.Now()}
 	}
 	defer resp.Body.Close()
 
@@ -191,6 +204,7 @@ func (lt *LoadTester) makeRequest() Result {
 			StatusCode:   resp.StatusCode,
 			ResponseTime: responseTime,
 			Error:        err,
+			Timestamp:    time.Now(),
 		}
 	}
 
@@ -198,6 +212,7 @@ func (lt *LoadTester) makeRequest() Result {
 		StatusCode:   resp.StatusCode,
 		ResponseTime: responseTime,
 		ContentSize:  int64(len(bodyBytes)),
+		Timestamp:    time.Now(),
 	}
 }
 
@@ -210,13 +225,13 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 	completed := 0
 	progressMu := sync.Mutex{}
 
-	liveStats := &LiveStats{
-		statusCodes:     make(map[int]int),
-		minResponseTime: time.Duration(0),
-		maxResponseTime: time.Duration(0),
-	}
-
 	for i := 0; i < lt.config.Requests; i++ {
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+
 		wg.Add(1)
 		semaphore <- struct{}{}
 
@@ -225,25 +240,6 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 			defer func() { <-semaphore }()
 
 			result := lt.makeRequest()
-
-			// Update live stats
-			liveStats.mu.Lock()
-			if result.Error == nil {
-				liveStats.successful++
-				liveStats.totalBytes += result.ContentSize
-			} else {
-				liveStats.failed++
-			}
-			liveStats.statusCodes[result.StatusCode]++
-			liveStats.responseTimes = append(liveStats.responseTimes, result.ResponseTime)
-
-			if liveStats.minResponseTime == 0 || result.ResponseTime < liveStats.minResponseTime {
-				liveStats.minResponseTime = result.ResponseTime
-			}
-			if result.ResponseTime > liveStats.maxResponseTime {
-				liveStats.maxResponseTime = result.ResponseTime
-			}
-			liveStats.mu.Unlock()
 
 			lt.mu.Lock()
 			lt.results = append(lt.results, result)
@@ -259,6 +255,8 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 			case updateChan <- progressMsg{completed: currentCompleted, result: result}:
 			case <-ctx.Done():
 				return
+			default:
+				// Non-blocking send to prevent goroutine leaks
 			}
 		}()
 	}
@@ -272,6 +270,7 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 	select {
 	case updateChan <- completeMsg{stats: stats}:
 	case <-ctx.Done():
+	default:
 	}
 
 	return stats
@@ -349,6 +348,17 @@ func (lt *LoadTester) SaveResultsToJSON(filename string, stats *Stats) error {
 func NewLiveStats() *LiveStats {
 	return &LiveStats{
 		statusCodes: make(map[int]int),
+		lastSecond:  time.Now(),
+	}
+}
+
+// updateQPS updates QPS calculation
+func (ls *LiveStats) updateQPS() {
+	now := time.Now()
+	if now.Sub(ls.lastSecond) >= time.Second {
+		ls.currentQPS = float64(ls.requestsThisSecond)
+		ls.requestsThisSecond = 0
+		ls.lastSecond = now
 	}
 }
 
@@ -360,13 +370,15 @@ func initialModel(loadTester *LoadTester) model {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return model{
-		loadTester:  loadTester,
-		progress:    p,
-		spinner:     s,
-		state:       "ready",
-		total:       loadTester.config.Requests,
-		liveStats:   NewLiveStats(),
-		currentTime: time.Now(),
+		loadTester:       loadTester,
+		progress:         p,
+		spinner:          s,
+		state:            "ready",
+		total:            loadTester.config.Requests,
+		liveStats:        NewLiveStats(),
+		currentTime:      time.Now(),
+		qpsHistory:       make([]float64, 0, 60),        // Keep last 60 seconds
+		responseTimeHist: make([]time.Duration, 0, 100), // Keep last 100 response times
 	}
 }
 
@@ -385,6 +397,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
 		}
 
@@ -393,28 +408,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = "running"
 			m.startTime = time.Now()
 
+			// Create context and channel
 			ctx, cancel := context.WithCancel(context.Background())
-			updateChan := make(chan tea.Msg, 100)
+			m.ctx = ctx
+			m.cancel = cancel
+			updateChan := make(chan tea.Msg, 1000) // Larger buffer
+			m.updateChan = updateChan
 
 			// Start the load test in a goroutine
 			go func() {
-				defer cancel()
 				defer close(updateChan)
 				m.loadTester.RunWithTUI(ctx, updateChan)
 			}()
 
-			// Listen for updates
-			return m, tea.Batch(
-				func() tea.Cmd {
-					return func() tea.Msg {
-						for msg := range updateChan {
-							return msg
-						}
-						return nil
-					}
-				}(),
-				m.spinner.Tick,
-			)
+			// Start listening for updates
+			return m, m.listenForUpdates()
 		}
 
 	case progressMsg:
@@ -430,6 +438,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.liveStats.statusCodes[msg.result.StatusCode]++
 		m.liveStats.responseTimes = append(m.liveStats.responseTimes, msg.result.ResponseTime)
+		m.liveStats.requestsThisSecond++
+
+		// Keep only recent response times for chart
+		if len(m.responseTimeHist) >= 100 {
+			m.responseTimeHist = m.responseTimeHist[1:]
+		}
+		m.responseTimeHist = append(m.responseTimeHist, msg.result.ResponseTime)
 
 		if m.liveStats.minResponseTime == 0 || msg.result.ResponseTime < m.liveStats.minResponseTime {
 			m.liveStats.minResponseTime = msg.result.ResponseTime
@@ -437,12 +452,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.ResponseTime > m.liveStats.maxResponseTime {
 			m.liveStats.maxResponseTime = msg.result.ResponseTime
 		}
+
+		m.liveStats.updateQPS()
 		m.liveStats.mu.Unlock()
 
 		if m.completed >= m.total {
 			m.state = "completed"
 		}
-		return m, m.spinner.Tick
+
+		return m, tea.Batch(m.spinner.Tick, m.listenForUpdates())
 
 	case completeMsg:
 		m.state = "completed"
@@ -451,6 +469,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.currentTime = time.Time(msg)
+
+		// Update QPS history
+		if m.state == "running" {
+			m.liveStats.mu.RLock()
+			currentQPS := m.liveStats.currentQPS
+			m.liveStats.mu.RUnlock()
+
+			if len(m.qpsHistory) >= 60 {
+				m.qpsHistory = m.qpsHistory[1:]
+			}
+			m.qpsHistory = append(m.qpsHistory, currentQPS)
+		}
+
 		return m, tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		})
@@ -465,6 +496,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) listenForUpdates() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case msg, ok := <-m.updateChan:
+			if !ok {
+				return nil
+			}
+			return msg
+		case <-m.ctx.Done():
+			return nil
+		default:
+			return nil
+		}
+	}
 }
 
 func (m model) View() string {
@@ -513,6 +560,7 @@ func (m model) View() string {
 
 		m.liveStats.mu.RLock()
 		currentRPS := float64(m.completed) / elapsed.Seconds()
+		currentQPS := m.liveStats.currentQPS
 
 		var avgResponseTime time.Duration
 		if len(m.liveStats.responseTimes) > 0 {
@@ -528,7 +576,8 @@ func (m model) View() string {
 				"Elapsed: %v\n"+
 				"Successful: %s\n"+
 				"Failed: %s\n"+
-				"Current RPS: %.2f\n"+
+				"Overall RPS: %.2f\n"+
+				"Current QPS: %.2f\n"+
 				"Avg Response Time: %v\n"+
 				"Min Response Time: %v\n"+
 				"Max Response Time: %v\n"+
@@ -538,6 +587,7 @@ func (m model) View() string {
 			successStyle.Render(fmt.Sprintf("%d", m.liveStats.successful)),
 			errorStyle.Render(fmt.Sprintf("%d", m.liveStats.failed)),
 			currentRPS,
+			currentQPS,
 			avgResponseTime.Truncate(time.Microsecond),
 			m.liveStats.minResponseTime.Truncate(time.Microsecond),
 			m.liveStats.maxResponseTime.Truncate(time.Microsecond),
@@ -547,6 +597,31 @@ func (m model) View() string {
 
 		s.WriteString(liveStatsBox)
 		s.WriteString("\n\n")
+
+		// QPS Chart
+		if len(m.qpsHistory) > 1 {
+			qpsChart := m.renderQPSChart()
+			chartBox := boxStyle.Render(fmt.Sprintf(
+				"%s\n%s",
+				headerStyle.Render("QPS Chart (last 60s)"),
+				qpsChart,
+			))
+			s.WriteString(chartBox)
+			s.WriteString("\n\n")
+		}
+
+		// Response Time Chart
+		if len(m.responseTimeHist) > 1 {
+			rtChart := m.renderResponseTimeChart()
+			chartBox := boxStyle.Render(fmt.Sprintf(
+				"%s\n%s",
+				headerStyle.Render("Response Time Chart (last 100 requests)"),
+				rtChart,
+			))
+			s.WriteString(chartBox)
+			s.WriteString("\n\n")
+		}
+
 		s.WriteString(m.spinner.View() + " Running...")
 
 	case "completed":
@@ -608,6 +683,120 @@ func (m model) View() string {
 	}
 
 	return s.String()
+}
+
+// renderQPSChart renders an ASCII bar chart for QPS
+func (m model) renderQPSChart() string {
+	if len(m.qpsHistory) < 2 {
+		return "No data yet..."
+	}
+
+	const width = 50
+	const height = 8
+
+	// Find min and max for scaling
+	minQPS := math.Inf(1)
+	maxQPS := math.Inf(-1)
+	for _, qps := range m.qpsHistory {
+		if qps < minQPS {
+			minQPS = qps
+		}
+		if qps > maxQPS {
+			maxQPS = qps
+		}
+	}
+
+	if maxQPS == minQPS {
+		maxQPS = minQPS + 1
+	}
+
+	var chart strings.Builder
+
+	// Draw the chart from top to bottom
+	for row := height - 1; row >= 0; row-- {
+		threshold := minQPS + (maxQPS-minQPS)*float64(row)/float64(height-1)
+
+		for i := 0; i < width; i++ {
+			if i < len(m.qpsHistory) {
+				idx := len(m.qpsHistory) - width + i
+				if idx < 0 {
+					chart.WriteString(" ")
+				} else {
+					qps := m.qpsHistory[idx]
+					if qps >= threshold {
+						chart.WriteString(chartStyle.Render("█"))
+					} else {
+						chart.WriteString(" ")
+					}
+				}
+			} else {
+				chart.WriteString(" ")
+			}
+		}
+		chart.WriteString(fmt.Sprintf(" %.1f", threshold))
+		if row > 0 {
+			chart.WriteString("\n")
+		}
+	}
+
+	return chart.String()
+}
+
+// renderResponseTimeChart renders an ASCII line chart for response times
+func (m model) renderResponseTimeChart() string {
+	if len(m.responseTimeHist) < 2 {
+		return "No data yet..."
+	}
+
+	const width = 50
+	const height = 6
+
+	// Find min and max for scaling
+	minRT := time.Duration(math.MaxInt64)
+	maxRT := time.Duration(0)
+	for _, rt := range m.responseTimeHist {
+		if rt < minRT {
+			minRT = rt
+		}
+		if rt > maxRT {
+			maxRT = rt
+		}
+	}
+
+	if maxRT == minRT {
+		maxRT = minRT + time.Millisecond
+	}
+
+	var chart strings.Builder
+
+	// Draw the chart from top to bottom
+	for row := height - 1; row >= 0; row-- {
+		threshold := minRT + time.Duration(float64(maxRT-minRT)*float64(row)/float64(height-1))
+
+		for i := 0; i < width; i++ {
+			if i < len(m.responseTimeHist) {
+				idx := len(m.responseTimeHist) - width + i
+				if idx < 0 {
+					chart.WriteString(" ")
+				} else {
+					rt := m.responseTimeHist[idx]
+					if rt >= threshold {
+						chart.WriteString(chartStyle.Render("▄"))
+					} else {
+						chart.WriteString(" ")
+					}
+				}
+			} else {
+				chart.WriteString(" ")
+			}
+		}
+		chart.WriteString(fmt.Sprintf(" %v", threshold.Truncate(time.Microsecond)))
+		if row > 0 {
+			chart.WriteString("\n")
+		}
+	}
+
+	return chart.String()
 }
 
 func formatStatusCodes(codes map[int]int, total int) string {
@@ -674,6 +863,7 @@ func main() {
 	}
 
 	tester := NewLoadTester(config)
+	var finalStats *Stats
 
 	if *noTUI {
 		// Use simple CLI output
@@ -686,7 +876,7 @@ func main() {
 		fmt.Println(strings.Repeat("-", 50))
 
 		ctx := context.Background()
-		updateChan := make(chan tea.Msg, 100)
+		updateChan := make(chan tea.Msg, 1000)
 		go func() {
 			defer close(updateChan)
 			tester.RunWithTUI(ctx, updateChan)
@@ -700,6 +890,7 @@ func main() {
 				fmt.Printf("\rProgress: %d/%d (%.1f%%)", m.completed, config.Requests, percent)
 			case completeMsg:
 				fmt.Printf("\rCompleted: %d/%d (100.0%%)\n", config.Requests, config.Requests)
+				finalStats = m.stats
 				printSimpleStats(m.stats)
 			}
 		}
@@ -708,37 +899,26 @@ func main() {
 		m := initialModel(tester)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 
-		if _, err := p.Run(); err != nil {
+		finalModel, err := p.Run()
+		if err != nil {
 			fmt.Printf("Error running TUI: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Extract final stats from the model
+		if finalModel != nil {
+			if tuiModel, ok := finalModel.(model); ok {
+				finalStats = tuiModel.stats
+			}
 		}
 	}
 
 	// Save results to JSON if output file specified
-	if *output != "" {
-		// We need to get the stats - for simplicity, run a quick test again
-		// In a real implementation, you'd pass the stats from the TUI
-		ctx := context.Background()
-		updateChan := make(chan tea.Msg, 100)
-		go func() {
-			defer close(updateChan)
-			tester.RunWithTUI(ctx, updateChan)
-		}()
-
-		var finalStats *Stats
-		for msg := range updateChan {
-			if m, ok := msg.(completeMsg); ok {
-				finalStats = m.stats
-				break
-			}
-		}
-
-		if finalStats != nil {
-			if err := tester.SaveResultsToJSON(*output, finalStats); err != nil {
-				log.Printf("Error saving results to JSON: %v", err)
-			} else {
-				fmt.Printf("Results saved to: %s\n", *output)
-			}
+	if *output != "" && finalStats != nil {
+		if err := tester.SaveResultsToJSON(*output, finalStats); err != nil {
+			log.Printf("Error saving results to JSON: %v", err)
+		} else {
+			fmt.Printf("Results saved to: %s\n", *output)
 		}
 	}
 }
@@ -747,34 +927,41 @@ func printSimpleStats(stats *Stats) {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println("LOAD TEST RESULTS")
 	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("Total Requests: %d\n", stats.TotalRequests)
+	fmt.Printf("Successful: %d (%.2f%%)\n", stats.SuccessfulReqs,
+		float64(stats.SuccessfulReqs)/float64(stats.TotalRequests)*100)
+	fmt.Printf("Failed: %d (%.2f%%)\n", stats.FailedReqs,
+		float64(stats.FailedReqs)/float64(stats.TotalRequests)*100)
+	fmt.Printf("Total Time: %v\n", stats.TotalTime.Truncate(time.Millisecond))
+	fmt.Printf("Requests/sec: %.2f\n", stats.RequestsPerSec)
+	fmt.Printf("Data Transfer: %.2f MB\n", float64(stats.TotalBytes)/(1024*1024))
 
-	fmt.Printf("Total Requests:      %d\n", stats.TotalRequests)
-	fmt.Printf("Successful Requests: %d\n", stats.SuccessfulReqs)
-	fmt.Printf("Failed Requests:     %d\n", stats.FailedReqs)
-	fmt.Printf("Success Rate:        %.2f%%\n", float64(stats.SuccessfulReqs)/float64(stats.TotalRequests)*100)
-	fmt.Printf("Total Time:          %v\n", stats.TotalTime)
-	fmt.Printf("Requests per Second: %.2f\n", stats.RequestsPerSec)
-	fmt.Printf("Total Data Transfer: %.2f MB\n", float64(stats.TotalBytes)/(1024*1024))
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println("RESPONSE TIMES")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("Min: %v\n", stats.MinResponseTime.Truncate(time.Microsecond))
+	fmt.Printf("Max: %v\n", stats.MaxResponseTime.Truncate(time.Microsecond))
+	fmt.Printf("Avg: %v\n", stats.AvgResponseTime.Truncate(time.Microsecond))
 
-	fmt.Println("\nResponse Times:")
-	fmt.Printf("  Min:     %v\n", stats.MinResponseTime)
-	fmt.Printf("  Max:     %v\n", stats.MaxResponseTime)
-	fmt.Printf("  Average: %v\n", stats.AvgResponseTime)
-
-	fmt.Println("\nPercentiles:")
-	for _, p := range []int{50, 90, 95, 99} {
-		fmt.Printf("  %dth:     %v\n", p, stats.Percentiles[p])
+	if len(stats.Percentiles) > 0 {
+		fmt.Printf("50th percentile: %v\n", stats.Percentiles[50].Truncate(time.Microsecond))
+		fmt.Printf("90th percentile: %v\n", stats.Percentiles[90].Truncate(time.Microsecond))
+		fmt.Printf("95th percentile: %v\n", stats.Percentiles[95].Truncate(time.Microsecond))
+		fmt.Printf("99th percentile: %v\n", stats.Percentiles[99].Truncate(time.Microsecond))
 	}
 
-	fmt.Println("\nStatus Code Distribution:")
-	for code, count := range stats.StatusCodes {
-		percentage := float64(count) / float64(stats.TotalRequests) * 100
-		if code == 0 {
-			fmt.Printf("  Errors:  %d (%.1f%%)\n", count, percentage)
-		} else {
-			fmt.Printf("  %d:       %d (%.1f%%)\n", code, count, percentage)
+	if len(stats.StatusCodes) > 0 {
+		fmt.Println(strings.Repeat("-", 40))
+		fmt.Println("STATUS CODES")
+		fmt.Println(strings.Repeat("-", 40))
+		for code, count := range stats.StatusCodes {
+			percentage := float64(count) / float64(stats.TotalRequests) * 100
+			if code == 0 {
+				fmt.Printf("Errors: %d (%.1f%%)\n", count, percentage)
+			} else {
+				fmt.Printf("%d: %d (%.1f%%)\n", code, count, percentage)
+			}
 		}
 	}
-
 	fmt.Println(strings.Repeat("=", 60))
 }
