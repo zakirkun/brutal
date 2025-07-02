@@ -324,8 +324,7 @@ func printStats(stats *Stats) {
 
 func printBanner() {
 	if !noBanner {
-		fmt.Println(banner)
-		fmt.Println()
+		fmt.Print(banner)
 	}
 }
 
