@@ -176,7 +176,7 @@ jobs:
         Architecture: amd64
         Maintainer: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
         Description: Brutal Load Tester
-         A powerful command-line load testing tool with beautiful TUI
+         A powerful command-line load testing tool
         EOF
         
         # Create copyright file
@@ -212,7 +212,7 @@ jobs:
         AutoReqProv: no
         
         %description
-        A powerful command-line load testing tool with beautiful TUI
+        A powerful command-line load testing tool
         
         %prep
         # No preparation needed since we're installing a pre-built binary

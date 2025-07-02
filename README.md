@@ -1,6 +1,6 @@
 # 🚀 Brutal Load Tester
 
-A powerful, beautiful, and blazingly fast HTTP load testing tool with an interactive TUI (Text User Interface) and real-time analytics.
+A powerful, blazingly fast HTTP load testing tool with comprehensive analytics and a modern CLI interface powered by Cobra.
 
 ![Build Status](https://github.com/zakirkun/brutal/workflows/Continuous%20Integration/badge.svg)
 ![Release](https://github.com/zakirkun/brutal/workflows/Build%20and%20Release/badge.svg)
@@ -9,32 +9,33 @@ A powerful, beautiful, and blazingly fast HTTP load testing tool with an interac
 
 ## ✨ Features
 
-### 🎨 **Beautiful TUI Interface**
-- **Real-time progress visualization** with animated progress bars
-- **Live statistics** showing successful/failed requests, response times, and throughput
-- **Interactive charts** with ASCII-based visualizations
-- **Color-coded output** for easy status recognition
-- **Responsive design** that adapts to terminal size
-
-### 📊 **Advanced Analytics**
-- **QPS Chart**: Real-time queries per second over the last 60 seconds
-- **Response Time Chart**: Live response time visualization for the last 100 requests
-- **Live Statistics**: Detailed metrics including RPS, avg/min/max response times
-- **Data Transfer Tracking**: Monitor bandwidth usage in real-time
-- **Status Code Analysis**: Comprehensive HTTP status code breakdown
-
 ### ⚡ **High Performance**
 - **Concurrent request handling** with configurable worker pools
 - **Efficient memory usage** with optimized data structures
-- **Non-blocking UI updates** for smooth real-time experience
+- **Real-time progress tracking** during load tests
 - **Lightweight binary** with minimal system requirements
 
-### 🛠 **Flexible Configuration**
+### 📊 **Comprehensive Analytics**
+- **Detailed statistics** including response times, throughput, and error rates
+- **Percentile analysis** (50th, 95th, 99th percentiles)
+- **Status code breakdown** with detailed error reporting
+- **Data transfer tracking** with bandwidth monitoring
+- **JSON output** for integration with other tools
+
+### 🛠 **Modern CLI Interface**
+- **Cobra-powered CLI** with intuitive commands and flags
+- **Shell completion** support (Bash, Zsh, Fish, PowerShell)
+- **Contextual help** with examples and usage patterns
+- **Version management** with dedicated commands
+- **Flexible input** - URL as argument or flag
+- **ASCII art banner** with "Brutal Buster" branding (optional)
+
+### 🔧 **Flexible Configuration**
 - **Multiple HTTP methods** (GET, POST, PUT, DELETE, etc.)
 - **Custom headers** and request bodies
 - **Configurable timeouts** and retry policies
 - **TLS certificate verification control**
-- **JSON output** for integration with other tools
+- **Short and long flag options** for convenience
 
 ## 📦 Installation
 
@@ -91,111 +92,147 @@ cd brutal
 go build -o brutal .
 ```
 
+### Shell Completion Setup
+
+After installation, enable shell completion for a better experience:
+
+#### Bash
+```bash
+# Add to ~/.bashrc
+echo 'source <(brutal completion bash)' >> ~/.bashrc
+
+# Or install system-wide (Linux)
+sudo brutal completion bash > /etc/bash_completion.d/brutal
+```
+
+#### Zsh
+```bash
+# Add to ~/.zshrc
+echo 'autoload -U compinit; compinit' >> ~/.zshrc
+brutal completion zsh > "${fpath[1]}/_brutal"
+```
+
+#### Fish
+```bash
+brutal completion fish > ~/.config/fish/completions/brutal.fish
+```
+
+#### PowerShell
+```powershell
+brutal completion powershell | Out-String | Invoke-Expression
+```
+
 ## 🚀 Quick Start
 
 ### Basic Usage
 ```bash
-# Simple load test
+# Simple load test (URL as argument)
 brutal https://api.example.com
 
-# Custom configuration
-brutal https://api.example.com -n 1000 -c 50 -timeout 10s
+# Using URL flag
+brutal --url https://api.example.com
+
+# Custom configuration with short flags
+brutal https://api.example.com -n 1000 -c 50 -t 10s
+
+# Custom configuration with long flags
+brutal https://api.example.com --requests 1000 --concurrent 50 --timeout 10s
 ```
 
 ### Advanced Examples
 
 #### POST Request with JSON Body
 ```bash
+# Using short flags
 brutal https://api.example.com/users \
-  -method POST \
-  -headers '{"Content-Type": "application/json", "Authorization": "Bearer token"}' \
-  -body '{"name": "John Doe", "email": "john@example.com"}'
+  -X POST \
+  -H '{"Content-Type": "application/json", "Authorization": "Bearer token"}' \
+  -d '{"name": "John Doe", "email": "john@example.com"}'
+
+# Using long flags
+brutal https://api.example.com/users \
+  --method POST \
+  --headers '{"Content-Type": "application/json", "Authorization": "Bearer token"}' \
+  --body '{"name": "John Doe", "email": "john@example.com"}'
 ```
 
-#### High-Concurrency Test
+#### High-Concurrency Test with Output
 ```bash
 brutal https://api.example.com \
-  -n 10000 \
-  -c 100 \
-  -timeout 30s \
-  -output results.json
+  --requests 10000 \
+  --concurrent 100 \
+  --timeout 30s \
+  --output results.json
 ```
 
-#### Simple Mode (No TUI)
+#### Insecure HTTPS Testing
 ```bash
-brutal https://api.example.com -no-tui -n 100 -c 10
+brutal https://self-signed-cert.example.com \
+  --insecure \
+  --requests 50 \
+  --concurrent 5
 ```
 
-## 📋 Usage
+## 📋 Command Reference
 
+### Main Command
+```bash
+brutal [URL] [flags]
 ```
-brutal [OPTIONS] <URL>
 
-OPTIONS:
-  -n int         Total number of requests (default: 100)
-  -c int         Number of concurrent requests (default: 10)
-  -timeout dur   Request timeout (default: 30s)
-  -method string HTTP method (default: "GET")
-  -headers string Headers in JSON format
-  -body string   Request body
-  -insecure      Skip TLS certificate verification
-  -no-tui        Disable TUI and use simple output
-  -output string Output file for JSON results
+### Subcommands
+```bash
+brutal version                    # Show version information
+brutal completion [shell]         # Generate shell completion scripts
+brutal help                      # Show help for any command
+```
+
+### Flags
+
+| Short | Long          | Default | Description                           |
+|-------|---------------|---------|---------------------------------------|
+| `-u`  | `--url`       | -       | Target URL to test                    |
+| `-X`  | `--method`    | GET     | HTTP method                           |
+| `-H`  | `--headers`   | -       | Headers in JSON format                |
+| `-d`  | `--body`      | -       | Request body                          |
+| `-c`  | `--concurrent`| 10      | Number of concurrent requests         |
+| `-n`  | `--requests`  | 100     | Total number of requests              |
+| `-t`  | `--timeout`   | 30s     | Request timeout                       |
+| `-k`  | `--insecure`  | false   | Skip TLS certificate verification     |
+| `-o`  | `--output`    | -       | Output file for JSON results          |
+|       | `--no-banner` | false   | Disable ASCII art banner              |
+| `-h`  | `--help`      | -       | Help for brutal                       |
+
+### Examples with Different Flag Styles
+```bash
+# Short flags (compact)
+brutal https://api.example.com -n 100 -c 10 -t 5s -o results.json
+
+# Long flags (readable)
+brutal https://api.example.com --requests 100 --concurrent 10 --timeout 5s --output results.json
+
+# Mixed flags
+brutal https://api.example.com -n 100 --concurrent 10 -t 5s --output results.json
+
+# URL as flag vs argument
+brutal --url https://api.example.com -n 100
+brutal https://api.example.com -n 100
+
+# Disable banner for scripts/CI/CD
+brutal https://api.example.com -n 100 --no-banner
 ```
 
 ## 🎯 Example Output
 
-### TUI Mode (Default)
-```
-🚀 Go Brutal Tester
-
-┌─ Configuration ──────────────┐
-│ URL: https://api.example.com │
-│ Method: GET                  │
-│ Concurrent: 50               │
-│ Total Requests: 1000         │
-│ Timeout: 30s                 │
-└──────────────────────────────┘
-
-Progress: 750/1000 (75.0%)
-████████████████████████████████████████████████████████ 75.0%
-
-┌─ Live Statistics ────────────┐
-│ Elapsed: 15.2s               │
-│ Successful: 745              │
-│ Failed: 5                    │
-│ Overall RPS: 49.34           │
-│ Current QPS: 52.30           │
-│ Avg Response Time: 145ms     │
-│ Min Response Time: 89ms      │
-│ Max Response Time: 287ms     │
-│ Data Transferred: 2.15 MB    │
-└──────────────────────────────┘
-
-┌─ QPS Chart (last 60s) ───────┐
-│ ████████████████████ 55.2    │
-│ ██████████████████   48.7    │
-│ ████████████████     42.1    │
-│ ████████████         35.6    │
-└──────────────────────────────┘
-
-┌─ Response Time Chart ────────┐
-│ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄ 250ms     │
-│ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄    200ms     │
-│ ▄▄▄▄▄▄▄▄▄▄        150ms     │
-└──────────────────────────────┘
-
-⣻ Running... (Press Ctrl+C to stop)
-```
-
-### Simple Mode Output
 ```
 Starting load test...
 URL: https://api.example.com
 Method: GET
 Concurrent users: 10
 Total requests: 100
+Timeout: 30s
 --------------------------------------------------
+Progress: 100/100 (100.0%)
 Completed: 100/100 (100.0%)
 ============================================================
 LOAD TEST RESULTS
@@ -234,52 +271,97 @@ brutal https://dev-api.example.com -n 100 -c 5
 brutal https://staging-api.example.com -n 500 -c 20
 
 # Production (careful!)
-brutal https://api.example.com -n 1000 -c 10 -timeout 5s
+brutal https://api.example.com -n 1000 -c 10 -t 5s
 ```
 
 ### API Endpoint Testing
 ```bash
 # REST API
-brutal https://api.example.com/v1/users -method GET
-brutal https://api.example.com/v1/users -method POST -body '{"name":"test"}'
+brutal https://api.example.com/v1/users -X GET
+brutal https://api.example.com/v1/users -X POST -d '{"name":"test"}'
 
 # GraphQL
 brutal https://api.example.com/graphql \
-  -method POST \
-  -headers '{"Content-Type": "application/json"}' \
-  -body '{"query": "{ users { id name } }"}'
+  --method POST \
+  --headers '{"Content-Type": "application/json"}' \
+  --body '{"query": "{ users { id name } }"}'
+```
+
+### Different Authentication Methods
+```bash
+# Bearer Token
+brutal https://api.example.com \
+  -H '{"Authorization": "Bearer your-token-here"}' \
+  -n 50
+
+# API Key
+brutal https://api.example.com \
+  -H '{"X-API-Key": "your-api-key"}' \
+  -n 50
+
+# Basic Auth (Base64 encoded)
+brutal https://api.example.com \
+  -H '{"Authorization": "Basic dXNlcjpwYXNz"}' \
+  -n 50
+```
+
+### Banner Control
+```bash
+# With banner (default) - great for interactive use
+brutal https://api.example.com -n 100
+
+# Without banner - perfect for scripts and CI/CD
+brutal https://api.example.com -n 100 --no-banner
+
+# Version with banner
+brutal version
+
+# Version without banner for scripts
+brutal version --no-banner
 ```
 
 ## 📊 Output Formats
 
+### Console Output
+Beautiful, real-time console output with progress indicators and comprehensive statistics.
+
 ### JSON Output
-Use `-output results.json` to save detailed results:
+Use `-o results.json` or `--output results.json` to save detailed results:
 ```json
 {
-  "total_requests": 1000,
-  "successful_requests": 987,
-  "failed_requests": 13,
-  "total_time": "45.123s",
-  "requests_per_second": 22.15,
-  "data_transferred_mb": 5.67,
-  "response_times": {
-    "min": "89.123ms",
-    "max": "1.234s", 
-    "avg": "234.567ms",
-    "p50": "220.123ms",
-    "p95": "456.789ms",
-    "p99": "987.654ms"
+  "config": {
+    "url": "https://api.example.com",
+    "method": "GET",
+    "concurrent": 10,
+    "requests": 100,
+    "timeout": "30s"
   },
-  "status_codes": {
-    "200": 987,
-    "500": 13
+  "stats": {
+    "total_requests": 100,
+    "successful_requests": 98,
+    "failed_requests": 2,
+    "total_time": "5.234s",
+    "requests_per_second": 19.11,
+    "data_transferred_mb": 0.85,
+    "response_times": {
+      "min": "89.123ms",
+      "max": "456.123ms", 
+      "avg": "187.456ms",
+      "p50": "165.234ms",
+      "p95": "398.567ms",
+      "p99": "445.123ms"
+    },
+    "status_codes": {
+      "200": 98,
+      "500": 2
+    }
   }
 }
 ```
 
 ## 🛡️ Security Features
 
-- **TLS Verification**: Enabled by default, can be disabled with `-insecure`
+- **TLS Verification**: Enabled by default, can be disabled with `-k`/`--insecure`
 - **Safe Defaults**: Conservative default values to prevent accidental DoS
 - **No Sensitive Data Logging**: Ensures credentials aren't leaked in outputs
 - **Timeout Protection**: Prevents hanging requests
@@ -294,13 +376,13 @@ Use `-output results.json` to save detailed results:
 curl -I https://api.example.com
 
 # Test with a longer timeout
-brutal https://api.example.com -timeout 60s
+brutal https://api.example.com --timeout 60s
 ```
 
 #### High Failure Rate
 ```bash
 # Reduce concurrency
-brutal https://api.example.com -c 5 -n 100
+brutal https://api.example.com --concurrent 5 --requests 100
 
 # Check server logs for rate limiting
 brutal https://api.example.com -c 1 -n 10
@@ -309,7 +391,19 @@ brutal https://api.example.com -c 1 -n 10
 #### TLS Certificate Issues
 ```bash
 # Skip certificate verification (not recommended for production)
-brutal https://api.example.com -insecure
+brutal https://api.example.com --insecure
+```
+
+#### Help and Documentation
+```bash
+# General help
+brutal --help
+
+# Command-specific help
+brutal completion --help
+
+# Version information
+brutal version
 ```
 
 ## 🤝 Contributing
@@ -321,7 +415,7 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 git clone https://github.com/zakirkun/brutal.git
 cd brutal
 go mod download
-go run . -h
+go run . --help
 ```
 
 ### Running Tests
@@ -331,6 +425,17 @@ go test -race ./...
 go test -bench=. ./...
 ```
 
+### Testing CLI Changes
+```bash
+# Test help system
+go run . --help
+go run . version
+go run . completion bash
+
+# Test load testing
+go run . https://httpbin.org/get -n 5 -c 2
+```
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -338,7 +443,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - Built with [Go](https://golang.org/)
-- TUI powered by [Bubble Tea](https://github.com/charmbracelet/bubbletea)
+- CLI powered by [Cobra](https://github.com/spf13/cobra)
 - Inspired by tools like Apache Bench, wrk, and hey
 
 ---

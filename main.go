@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,11 +14,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/spf13/cobra"
 )
+
+// ASCII Art Banner
+const banner = `
+` + "\033[36m" + `██████╗ ██████╗ ██╗   ██╗████████╗ █████╗ ██╗         ██████╗ ██╗   ██╗███████╗████████╗███████╗██████╗` + "\033[0m" + `
+` + "\033[36m" + `██╔══██╗██╔══██╗██║   ██║╚══██╔══╝██╔══██╗██║         ██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔════╝██╔══██╗` + "\033[0m" + `
+` + "\033[35m" + `██████╔╝██████╔╝██║   ██║   ██║   ███████║██║         ██████╔╝██║   ██║███████╗   ██║   █████╗  ██████╔╝` + "\033[0m" + `
+` + "\033[35m" + `██╔══██╗██╔══██╗██║   ██║   ██║   ██╔══██║██║         ██╔══██╗██║   ██║╚════██║   ██║   ██╔══╝  ██╔══██╗` + "\033[0m" + `
+` + "\033[31m" + `██████╔╝██║  ██║╚██████╔╝   ██║   ██║  ██║███████╗    ██████╔╝╚██████╔╝███████║   ██║   ███████╗██║  ██║` + "\033[0m" + `
+` + "\033[31m" + `╚═════╝ ╚═╝  ╚═╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝╚══════╝    ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝` + "\033[0m" + `
+                                                                                                          
+` + "\033[33m" + `                           🚀 High-Performance HTTP Load Testing Tool 🚀` + "\033[0m" + `
+`
 
 // Config holds the configuration for load testing
 type Config struct {
@@ -68,78 +75,20 @@ type LoadTester struct {
 	mu         sync.Mutex
 }
 
-// TUI Model for bubble tea
-type model struct {
-	loadTester       *LoadTester
-	progress         progress.Model
-	spinner          spinner.Model
-	state            string
-	completed        int
-	total            int
-	stats            *Stats
-	startTime        time.Time
-	currentTime      time.Time
-	liveStats        *LiveStats
-	err              error
-	qpsHistory       []float64
-	responseTimeHist []time.Duration
-	updateChan       chan tea.Msg
-	ctx              context.Context
-	cancel           context.CancelFunc
-}
-
-// LiveStats holds real-time statistics during testing
-type LiveStats struct {
-	mu                 sync.RWMutex
-	successful         int
-	failed             int
-	totalBytes         int64
-	responseTimes      []time.Duration
-	statusCodes        map[int]int
-	minResponseTime    time.Duration
-	maxResponseTime    time.Duration
-	lastSecond         time.Time
-	requestsThisSecond int
-	currentQPS         float64
-}
-
-// Styles for TUI
+// Global variables for command flags
 var (
-	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("205")).
-			Bold(true).
-			Padding(0, 1)
-
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("46"))
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196"))
-
-	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("33"))
-
-	headerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("213")).
-			Bold(true)
-
-	boxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("238")).
-			Padding(1, 2)
-
-	chartStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("82"))
+	url        string
+	method     string
+	headers    string
+	body       string
+	concurrent int
+	requests   int
+	timeout    time.Duration
+	insecure   bool
+	output     string
+	noBanner   bool
+	version    string = "dev"
 )
-
-// Messages for bubble tea
-type startTestMsg struct{}
-type progressMsg struct {
-	completed int
-	result    Result
-}
-type completeMsg struct{ stats *Stats }
-type tickMsg time.Time
 
 // NewLoadTester creates a new load tester instance
 func NewLoadTester(config Config) *LoadTester {
@@ -169,12 +118,12 @@ func NewLoadTester(config Config) *LoadTester {
 func (lt *LoadTester) makeRequest() Result {
 	start := time.Now()
 
-	var body io.Reader
+	var bodyReader io.Reader
 	if lt.config.Body != "" {
-		body = strings.NewReader(lt.config.Body)
+		bodyReader = strings.NewReader(lt.config.Body)
 	}
 
-	req, err := http.NewRequest(lt.config.Method, lt.config.URL, body)
+	req, err := http.NewRequest(lt.config.Method, lt.config.URL, bodyReader)
 	if err != nil {
 		return Result{Error: err, ResponseTime: time.Since(start), Timestamp: time.Now()}
 	}
@@ -216,8 +165,8 @@ func (lt *LoadTester) makeRequest() Result {
 	}
 }
 
-// RunWithTUI executes the load test with TUI
-func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg) *Stats {
+// Run executes the load test
+func (lt *LoadTester) Run(progressCallback func(completed, total int)) *Stats {
 	startTime := time.Now()
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, lt.config.Concurrent)
@@ -226,12 +175,6 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 	progressMu := sync.Mutex{}
 
 	for i := 0; i < lt.config.Requests; i++ {
-		select {
-		case <-ctx.Done():
-			break
-		default:
-		}
-
 		wg.Add(1)
 		semaphore <- struct{}{}
 
@@ -250,13 +193,8 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 			currentCompleted := completed
 			progressMu.Unlock()
 
-			// Send progress update
-			select {
-			case updateChan <- progressMsg{completed: currentCompleted, result: result}:
-			case <-ctx.Done():
-				return
-			default:
-				// Non-blocking send to prevent goroutine leaks
+			if progressCallback != nil {
+				progressCallback(currentCompleted, lt.config.Requests)
 			}
 		}()
 	}
@@ -264,65 +202,69 @@ func (lt *LoadTester) RunWithTUI(ctx context.Context, updateChan chan<- tea.Msg)
 	wg.Wait()
 	totalTime := time.Since(startTime)
 
-	stats := lt.calculateStats(totalTime)
-
-	// Send completion message
-	select {
-	case updateChan <- completeMsg{stats: stats}:
-	case <-ctx.Done():
-	default:
-	}
-
-	return stats
+	return lt.calculateStats(totalTime)
 }
 
 // calculateStats computes statistics from results
 func (lt *LoadTester) calculateStats(totalTime time.Duration) *Stats {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+
 	stats := &Stats{
 		TotalRequests: len(lt.results),
 		StatusCodes:   make(map[int]int),
+		Percentiles:   make(map[int]time.Duration),
 		TotalTime:     totalTime,
 	}
 
 	var responseTimes []time.Duration
-	var totalResponseTime time.Duration
+	var totalBytes int64
 
 	for _, result := range lt.results {
 		if result.Error == nil {
 			stats.SuccessfulReqs++
-			stats.TotalBytes += result.ContentSize
+			totalBytes += result.ContentSize
 		} else {
 			stats.FailedReqs++
 		}
 
-		stats.StatusCodes[result.StatusCode]++
 		responseTimes = append(responseTimes, result.ResponseTime)
-		totalResponseTime += result.ResponseTime
-
-		if stats.MinResponseTime == 0 || result.ResponseTime < stats.MinResponseTime {
-			stats.MinResponseTime = result.ResponseTime
-		}
-		if result.ResponseTime > stats.MaxResponseTime {
-			stats.MaxResponseTime = result.ResponseTime
-		}
+		stats.StatusCodes[result.StatusCode]++
 	}
 
-	if len(responseTimes) > 0 {
-		stats.AvgResponseTime = totalResponseTime / time.Duration(len(responseTimes))
-		stats.ResponseTimes = responseTimes
-		stats.RequestsPerSec = float64(stats.TotalRequests) / totalTime.Seconds()
+	stats.TotalBytes = totalBytes
+	stats.ResponseTimes = responseTimes
 
-		// Calculate percentiles
+	if len(responseTimes) > 0 {
 		sort.Slice(responseTimes, func(i, j int) bool {
 			return responseTimes[i] < responseTimes[j]
 		})
 
-		stats.Percentiles = map[int]time.Duration{
-			50: responseTimes[len(responseTimes)*50/100],
-			90: responseTimes[len(responseTimes)*90/100],
-			95: responseTimes[len(responseTimes)*95/100],
-			99: responseTimes[len(responseTimes)*99/100],
+		stats.MinResponseTime = responseTimes[0]
+		stats.MaxResponseTime = responseTimes[len(responseTimes)-1]
+
+		var total time.Duration
+		for _, rt := range responseTimes {
+			total += rt
 		}
+		stats.AvgResponseTime = total / time.Duration(len(responseTimes))
+
+		// Calculate percentiles
+		percentiles := []int{50, 95, 99}
+		for _, p := range percentiles {
+			index := int(math.Ceil(float64(p)/100*float64(len(responseTimes)))) - 1
+			if index < 0 {
+				index = 0
+			}
+			if index >= len(responseTimes) {
+				index = len(responseTimes) - 1
+			}
+			stats.Percentiles[p] = responseTimes[index]
+		}
+	}
+
+	if totalTime.Seconds() > 0 {
+		stats.RequestsPerSec = float64(stats.TotalRequests) / totalTime.Seconds()
 	}
 
 	return stats
@@ -331,9 +273,9 @@ func (lt *LoadTester) calculateStats(totalTime time.Duration) *Stats {
 // SaveResultsToJSON saves results to a JSON file
 func (lt *LoadTester) SaveResultsToJSON(filename string, stats *Stats) error {
 	data := map[string]interface{}{
-		"config":    lt.config,
-		"stats":     stats,
-		"timestamp": time.Now().Format(time.RFC3339),
+		"config":             lt.config,
+		"stats":              stats,
+		"individual_results": lt.results,
 	}
 
 	jsonData, err := json.MarshalIndent(data, "", "  ")
@@ -344,518 +286,79 @@ func (lt *LoadTester) SaveResultsToJSON(filename string, stats *Stats) error {
 	return os.WriteFile(filename, jsonData, 0644)
 }
 
-// NewLiveStats creates a new LiveStats instance
-func NewLiveStats() *LiveStats {
-	return &LiveStats{
-		statusCodes: make(map[int]int),
-		lastSecond:  time.Now(),
-	}
-}
+func printStats(stats *Stats) {
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("LOAD TEST RESULTS")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Printf("Total Requests: %d\n", stats.TotalRequests)
+	fmt.Printf("Successful: %d (%.2f%%)\n", stats.SuccessfulReqs, float64(stats.SuccessfulReqs)/float64(stats.TotalRequests)*100)
+	fmt.Printf("Failed: %d (%.2f%%)\n", stats.FailedReqs, float64(stats.FailedReqs)/float64(stats.TotalRequests)*100)
+	fmt.Printf("Total Time: %v\n", stats.TotalTime)
+	fmt.Printf("Requests/sec: %.2f\n", stats.RequestsPerSec)
+	fmt.Printf("Data Transfer: %.2f MB\n", float64(stats.TotalBytes)/(1024*1024))
 
-// updateQPS updates QPS calculation
-func (ls *LiveStats) updateQPS() {
-	now := time.Now()
-	if now.Sub(ls.lastSecond) >= time.Second {
-		ls.currentQPS = float64(ls.requestsThisSecond)
-		ls.requestsThisSecond = 0
-		ls.lastSecond = now
-	}
-}
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println("RESPONSE TIMES")
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Printf("Min: %v\n", stats.MinResponseTime)
+	fmt.Printf("Max: %v\n", stats.MaxResponseTime)
+	fmt.Printf("Avg: %v\n", stats.AvgResponseTime)
 
-// TUI Model Implementation
-func initialModel(loadTester *LoadTester) model {
-	p := progress.New(progress.WithDefaultGradient())
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
-
-	return model{
-		loadTester:       loadTester,
-		progress:         p,
-		spinner:          s,
-		state:            "ready",
-		total:            loadTester.config.Requests,
-		liveStats:        NewLiveStats(),
-		currentTime:      time.Now(),
-		qpsHistory:       make([]float64, 0, 60),        // Keep last 60 seconds
-		responseTimeHist: make([]time.Duration, 0, 100), // Keep last 100 response times
-	}
-}
-
-func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		m.spinner.Tick,
-		tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
-			return tickMsg(t)
-		}),
-		func() tea.Msg { return startTestMsg{} },
-	)
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
-			if m.cancel != nil {
-				m.cancel()
-			}
-			return m, tea.Quit
-		}
-
-	case startTestMsg:
-		if m.state == "ready" {
-			m.state = "running"
-			m.startTime = time.Now()
-
-			// Create context and channel
-			ctx, cancel := context.WithCancel(context.Background())
-			m.ctx = ctx
-			m.cancel = cancel
-			updateChan := make(chan tea.Msg, 1000) // Larger buffer
-			m.updateChan = updateChan
-
-			// Start the load test in a goroutine
-			go func() {
-				defer close(updateChan)
-				m.loadTester.RunWithTUI(ctx, updateChan)
-			}()
-
-			// Start listening for updates
-			return m, m.listenForUpdates()
-		}
-
-	case progressMsg:
-		m.completed = msg.completed
-
-		// Update live stats
-		m.liveStats.mu.Lock()
-		if msg.result.Error == nil {
-			m.liveStats.successful++
-			m.liveStats.totalBytes += msg.result.ContentSize
-		} else {
-			m.liveStats.failed++
-		}
-		m.liveStats.statusCodes[msg.result.StatusCode]++
-		m.liveStats.responseTimes = append(m.liveStats.responseTimes, msg.result.ResponseTime)
-		m.liveStats.requestsThisSecond++
-
-		// Keep only recent response times for chart
-		if len(m.responseTimeHist) >= 100 {
-			m.responseTimeHist = m.responseTimeHist[1:]
-		}
-		m.responseTimeHist = append(m.responseTimeHist, msg.result.ResponseTime)
-
-		if m.liveStats.minResponseTime == 0 || msg.result.ResponseTime < m.liveStats.minResponseTime {
-			m.liveStats.minResponseTime = msg.result.ResponseTime
-		}
-		if msg.result.ResponseTime > m.liveStats.maxResponseTime {
-			m.liveStats.maxResponseTime = msg.result.ResponseTime
-		}
-
-		m.liveStats.updateQPS()
-		m.liveStats.mu.Unlock()
-
-		if m.completed >= m.total {
-			m.state = "completed"
-		}
-
-		return m, tea.Batch(m.spinner.Tick, m.listenForUpdates())
-
-	case completeMsg:
-		m.state = "completed"
-		m.stats = msg.stats
-		return m, nil
-
-	case tickMsg:
-		m.currentTime = time.Time(msg)
-
-		// Update QPS history
-		if m.state == "running" {
-			m.liveStats.mu.RLock()
-			currentQPS := m.liveStats.currentQPS
-			m.liveStats.mu.RUnlock()
-
-			if len(m.qpsHistory) >= 60 {
-				m.qpsHistory = m.qpsHistory[1:]
-			}
-			m.qpsHistory = append(m.qpsHistory, currentQPS)
-		}
-
-		return m, tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg {
-			return tickMsg(t)
-		})
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-
-	default:
-		return m, nil
+	for p, time := range stats.Percentiles {
+		fmt.Printf("%dth percentile: %v\n", p, time)
 	}
 
-	return m, nil
-}
-
-func (m model) listenForUpdates() tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case msg, ok := <-m.updateChan:
-			if !ok {
-				return nil
-			}
-			return msg
-		case <-m.ctx.Done():
-			return nil
-		default:
-			return nil
-		}
-	}
-}
-
-func (m model) View() string {
-	var s strings.Builder
-
-	// Title
-	s.WriteString(titleStyle.Render("🚀 Go Brutal Tester"))
-	s.WriteString("\n\n")
-
-	// Configuration
-	configBox := boxStyle.Render(fmt.Sprintf(
-		"%s\n"+
-			"URL: %s\n"+
-			"Method: %s\n"+
-			"Concurrent: %d\n"+
-			"Total Requests: %d\n"+
-			"Timeout: %v",
-		headerStyle.Render("Configuration"),
-		m.loadTester.config.URL,
-		m.loadTester.config.Method,
-		m.loadTester.config.Concurrent,
-		m.loadTester.config.Requests,
-		m.loadTester.config.Timeout,
-	))
-	s.WriteString(configBox)
-	s.WriteString("\n\n")
-
-	switch m.state {
-	case "ready":
-		s.WriteString(infoStyle.Render("Preparing to start load test..."))
-		s.WriteString("\n")
-		s.WriteString(m.spinner.View())
-
-	case "running":
-		// Progress bar
-		percent := float64(m.completed) / float64(m.total)
-		s.WriteString(fmt.Sprintf("Progress: %d/%d (%.1f%%)\n", m.completed, m.total, percent*100))
-		s.WriteString(m.progress.ViewAs(percent))
-		s.WriteString("\n\n")
-
-		// Live statistics
-		elapsed := m.currentTime.Sub(m.startTime)
-		if elapsed == 0 {
-			elapsed = time.Millisecond
-		}
-
-		m.liveStats.mu.RLock()
-		currentRPS := float64(m.completed) / elapsed.Seconds()
-		currentQPS := m.liveStats.currentQPS
-
-		var avgResponseTime time.Duration
-		if len(m.liveStats.responseTimes) > 0 {
-			var total time.Duration
-			for _, rt := range m.liveStats.responseTimes {
-				total += rt
-			}
-			avgResponseTime = total / time.Duration(len(m.liveStats.responseTimes))
-		}
-
-		liveStatsBox := boxStyle.Render(fmt.Sprintf(
-			"%s\n"+
-				"Elapsed: %v\n"+
-				"Successful: %s\n"+
-				"Failed: %s\n"+
-				"Overall RPS: %.2f\n"+
-				"Current QPS: %.2f\n"+
-				"Avg Response Time: %v\n"+
-				"Min Response Time: %v\n"+
-				"Max Response Time: %v\n"+
-				"Data Transferred: %.2f MB",
-			headerStyle.Render("Live Statistics"),
-			elapsed.Truncate(time.Millisecond),
-			successStyle.Render(fmt.Sprintf("%d", m.liveStats.successful)),
-			errorStyle.Render(fmt.Sprintf("%d", m.liveStats.failed)),
-			currentRPS,
-			currentQPS,
-			avgResponseTime.Truncate(time.Microsecond),
-			m.liveStats.minResponseTime.Truncate(time.Microsecond),
-			m.liveStats.maxResponseTime.Truncate(time.Microsecond),
-			float64(m.liveStats.totalBytes)/(1024*1024),
-		))
-		m.liveStats.mu.RUnlock()
-
-		s.WriteString(liveStatsBox)
-		s.WriteString("\n\n")
-
-		// QPS Chart
-		if len(m.qpsHistory) > 1 {
-			qpsChart := m.renderQPSChart()
-			chartBox := boxStyle.Render(fmt.Sprintf(
-				"%s\n%s",
-				headerStyle.Render("QPS Chart (last 60s)"),
-				qpsChart,
-			))
-			s.WriteString(chartBox)
-			s.WriteString("\n\n")
-		}
-
-		// Response Time Chart
-		if len(m.responseTimeHist) > 1 {
-			rtChart := m.renderResponseTimeChart()
-			chartBox := boxStyle.Render(fmt.Sprintf(
-				"%s\n%s",
-				headerStyle.Render("Response Time Chart (last 100 requests)"),
-				rtChart,
-			))
-			s.WriteString(chartBox)
-			s.WriteString("\n\n")
-		}
-
-		s.WriteString(m.spinner.View() + " Running...")
-
-	case "completed":
-		if m.stats != nil {
-			s.WriteString(successStyle.Render("✅ Load test completed!"))
-			s.WriteString("\n\n")
-
-			// Final results
-			resultsBox := boxStyle.Render(fmt.Sprintf(
-				"%s\n"+
-					"Total Requests: %d\n"+
-					"Successful: %s (%d)\n"+
-					"Failed: %s (%d)\n"+
-					"Success Rate: %.2f%%\n"+
-					"Total Time: %v\n"+
-					"Requests/sec: %.2f\n"+
-					"Data Transfer: %.2f MB\n\n"+
-					"%s\n"+
-					"Min: %v\n"+
-					"Max: %v\n"+
-					"Avg: %v\n"+
-					"50th: %v\n"+
-					"90th: %v\n"+
-					"95th: %v\n"+
-					"99th: %v",
-				headerStyle.Render("Final Results"),
-				m.stats.TotalRequests,
-				successStyle.Render("✓"), m.stats.SuccessfulReqs,
-				errorStyle.Render("✗"), m.stats.FailedReqs,
-				float64(m.stats.SuccessfulReqs)/float64(m.stats.TotalRequests)*100,
-				m.stats.TotalTime.Truncate(time.Millisecond),
-				m.stats.RequestsPerSec,
-				float64(m.stats.TotalBytes)/(1024*1024),
-				headerStyle.Render("Response Times"),
-				m.stats.MinResponseTime.Truncate(time.Microsecond),
-				m.stats.MaxResponseTime.Truncate(time.Microsecond),
-				m.stats.AvgResponseTime.Truncate(time.Microsecond),
-				m.stats.Percentiles[50].Truncate(time.Microsecond),
-				m.stats.Percentiles[90].Truncate(time.Microsecond),
-				m.stats.Percentiles[95].Truncate(time.Microsecond),
-				m.stats.Percentiles[99].Truncate(time.Microsecond),
-			))
-			s.WriteString(resultsBox)
-			s.WriteString("\n\n")
-
-			// Status codes
-			if len(m.stats.StatusCodes) > 0 {
-				statusBox := boxStyle.Render(fmt.Sprintf(
-					"%s\n%s",
-					headerStyle.Render("Status Codes"),
-					formatStatusCodes(m.stats.StatusCodes, m.stats.TotalRequests),
-				))
-				s.WriteString(statusBox)
-				s.WriteString("\n\n")
-			}
-		}
-
-		s.WriteString(infoStyle.Render("Press 'q' or 'Ctrl+C' to exit"))
-	}
-
-	return s.String()
-}
-
-// renderQPSChart renders an ASCII bar chart for QPS
-func (m model) renderQPSChart() string {
-	if len(m.qpsHistory) < 2 {
-		return "No data yet..."
-	}
-
-	const width = 50
-	const height = 8
-
-	// Find min and max for scaling
-	minQPS := math.Inf(1)
-	maxQPS := math.Inf(-1)
-	for _, qps := range m.qpsHistory {
-		if qps < minQPS {
-			minQPS = qps
-		}
-		if qps > maxQPS {
-			maxQPS = qps
-		}
-	}
-
-	if maxQPS == minQPS {
-		maxQPS = minQPS + 1
-	}
-
-	var chart strings.Builder
-
-	// Draw the chart from top to bottom
-	for row := height - 1; row >= 0; row-- {
-		threshold := minQPS + (maxQPS-minQPS)*float64(row)/float64(height-1)
-
-		for i := 0; i < width; i++ {
-			if i < len(m.qpsHistory) {
-				idx := len(m.qpsHistory) - width + i
-				if idx < 0 {
-					chart.WriteString(" ")
-				} else {
-					qps := m.qpsHistory[idx]
-					if qps >= threshold {
-						chart.WriteString(chartStyle.Render("█"))
-					} else {
-						chart.WriteString(" ")
-					}
-				}
-			} else {
-				chart.WriteString(" ")
-			}
-		}
-		chart.WriteString(fmt.Sprintf(" %.1f", threshold))
-		if row > 0 {
-			chart.WriteString("\n")
-		}
-	}
-
-	return chart.String()
-}
-
-// renderResponseTimeChart renders an ASCII line chart for response times
-func (m model) renderResponseTimeChart() string {
-	if len(m.responseTimeHist) < 2 {
-		return "No data yet..."
-	}
-
-	const width = 50
-	const height = 6
-
-	// Find min and max for scaling
-	minRT := time.Duration(math.MaxInt64)
-	maxRT := time.Duration(0)
-	for _, rt := range m.responseTimeHist {
-		if rt < minRT {
-			minRT = rt
-		}
-		if rt > maxRT {
-			maxRT = rt
-		}
-	}
-
-	if maxRT == minRT {
-		maxRT = minRT + time.Millisecond
-	}
-
-	var chart strings.Builder
-
-	// Draw the chart from top to bottom
-	for row := height - 1; row >= 0; row-- {
-		threshold := minRT + time.Duration(float64(maxRT-minRT)*float64(row)/float64(height-1))
-
-		for i := 0; i < width; i++ {
-			if i < len(m.responseTimeHist) {
-				idx := len(m.responseTimeHist) - width + i
-				if idx < 0 {
-					chart.WriteString(" ")
-				} else {
-					rt := m.responseTimeHist[idx]
-					if rt >= threshold {
-						chart.WriteString(chartStyle.Render("▄"))
-					} else {
-						chart.WriteString(" ")
-					}
-				}
-			} else {
-				chart.WriteString(" ")
-			}
-		}
-		chart.WriteString(fmt.Sprintf(" %v", threshold.Truncate(time.Microsecond)))
-		if row > 0 {
-			chart.WriteString("\n")
-		}
-	}
-
-	return chart.String()
-}
-
-func formatStatusCodes(codes map[int]int, total int) string {
-	var parts []string
-	for code, count := range codes {
-		percentage := float64(count) / float64(total) * 100
+	fmt.Println(strings.Repeat("-", 40))
+	fmt.Println("STATUS CODES")
+	fmt.Println(strings.Repeat("-", 40))
+	for code, count := range stats.StatusCodes {
+		percentage := float64(count) / float64(stats.TotalRequests) * 100
 		if code == 0 {
-			parts = append(parts, errorStyle.Render(fmt.Sprintf("Errors: %d (%.1f%%)", count, percentage)))
+			fmt.Printf("Errors: %d (%.1f%%)\n", count, percentage)
 		} else {
-			style := successStyle
-			if code >= 400 {
-				style = errorStyle
-			}
-			parts = append(parts, style.Render(fmt.Sprintf("%d: %d (%.1f%%)", code, count, percentage)))
+			fmt.Printf("%d: %d (%.1f%%)\n", code, count, percentage)
 		}
 	}
-	return strings.Join(parts, "\n")
+	fmt.Println(strings.Repeat("=", 60))
 }
 
-func main() {
-	var (
-		url        = flag.String("url", "", "Target URL to test (required)")
-		method     = flag.String("method", "GET", "HTTP method")
-		headers    = flag.String("headers", "", "Headers in JSON format")
-		body       = flag.String("body", "", "Request body")
-		concurrent = flag.Int("c", 10, "Number of concurrent requests")
-		requests   = flag.Int("n", 100, "Total number of requests")
-		timeout    = flag.Duration("timeout", 30*time.Second, "Request timeout")
-		insecure   = flag.Bool("insecure", false, "Skip TLS certificate verification")
-		output     = flag.String("output", "", "Output file for JSON results")
-		noTUI      = flag.Bool("no-tui", false, "Disable TUI and use simple output")
-	)
-	flag.Parse()
+func printBanner() {
+	if !noBanner {
+		fmt.Println(banner)
+		fmt.Println()
+	}
+}
 
-	if *url == "" {
-		fmt.Println("Error: URL is required")
-		flag.Usage()
-		return
+func runLoadTest(cmd *cobra.Command, args []string) error {
+
+	if url == "" && len(args) == 0 {
+		return fmt.Errorf("URL is required")
+	}
+
+	// Use URL from args if not provided via flag
+	if url == "" && len(args) > 0 {
+		url = args[0]
 	}
 
 	config := Config{
-		URL:         *url,
-		Method:      strings.ToUpper(*method),
-		Concurrent:  *concurrent,
-		Requests:    *requests,
-		Timeout:     *timeout,
-		InsecureTLS: *insecure,
+		URL:         url,
+		Method:      strings.ToUpper(method),
+		Concurrent:  concurrent,
+		Requests:    requests,
+		Timeout:     timeout,
+		InsecureTLS: insecure,
 		Headers:     make(map[string]string),
 	}
 
 	// Parse headers if provided
-	if *headers != "" {
-		if err := json.Unmarshal([]byte(*headers), &config.Headers); err != nil {
-			log.Fatalf("Error parsing headers: %v", err)
+	if headers != "" {
+		if err := json.Unmarshal([]byte(headers), &config.Headers); err != nil {
+			return fmt.Errorf("error parsing headers: %v", err)
 		}
 	}
 
-	if *body != "" {
-		config.Body = *body
+	if body != "" {
+		config.Body = body
 		// Set Content-Type if not provided and body is present
 		if config.Headers["Content-Type"] == "" {
 			config.Headers["Content-Type"] = "application/json"
@@ -863,105 +366,139 @@ func main() {
 	}
 
 	tester := NewLoadTester(config)
-	var finalStats *Stats
 
-	if *noTUI {
-		// Use simple CLI output
-		fmt.Printf("Starting load test...\n")
-		fmt.Printf("URL: %s\n", config.URL)
-		fmt.Printf("Method: %s\n", config.Method)
-		fmt.Printf("Concurrent users: %d\n", config.Concurrent)
-		fmt.Printf("Total requests: %d\n", config.Requests)
-		fmt.Printf("Timeout: %v\n", config.Timeout)
-		fmt.Println(strings.Repeat("-", 50))
+	// Print banner and configuration
+	printBanner()
+	fmt.Printf("Starting load test...\n")
+	fmt.Printf("URL: %s\n", config.URL)
+	fmt.Printf("Method: %s\n", config.Method)
+	fmt.Printf("Concurrent users: %d\n", config.Concurrent)
+	fmt.Printf("Total requests: %d\n", config.Requests)
+	fmt.Printf("Timeout: %v\n", config.Timeout)
+	fmt.Println(strings.Repeat("-", 50))
 
-		ctx := context.Background()
-		updateChan := make(chan tea.Msg, 1000)
-		go func() {
-			defer close(updateChan)
-			tester.RunWithTUI(ctx, updateChan)
-		}()
+	// Run the load test with progress callback
+	stats := tester.Run(func(completed, total int) {
+		percent := float64(completed) / float64(total) * 100
+		fmt.Printf("\rProgress: %d/%d (%.1f%%)", completed, total, percent)
+	})
 
-		// Simple progress tracking
-		for msg := range updateChan {
-			switch m := msg.(type) {
-			case progressMsg:
-				percent := float64(m.completed) / float64(config.Requests) * 100
-				fmt.Printf("\rProgress: %d/%d (%.1f%%)", m.completed, config.Requests, percent)
-			case completeMsg:
-				fmt.Printf("\rCompleted: %d/%d (100.0%%)\n", config.Requests, config.Requests)
-				finalStats = m.stats
-				printSimpleStats(m.stats)
-			}
-		}
-	} else {
-		// Use TUI
-		m := initialModel(tester)
-		p := tea.NewProgram(m, tea.WithAltScreen())
-
-		finalModel, err := p.Run()
-		if err != nil {
-			fmt.Printf("Error running TUI: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Extract final stats from the model
-		if finalModel != nil {
-			if tuiModel, ok := finalModel.(model); ok {
-				finalStats = tuiModel.stats
-			}
-		}
-	}
+	fmt.Printf("\rCompleted: %d/%d (100.0%%)\n", config.Requests, config.Requests)
+	printStats(stats)
 
 	// Save results to JSON if output file specified
-	if *output != "" && finalStats != nil {
-		if err := tester.SaveResultsToJSON(*output, finalStats); err != nil {
+	if output != "" {
+		if err := tester.SaveResultsToJSON(output, stats); err != nil {
 			log.Printf("Error saving results to JSON: %v", err)
 		} else {
-			fmt.Printf("Results saved to: %s\n", *output)
+			fmt.Printf("Results saved to: %s\n", output)
 		}
 	}
+
+	return nil
 }
 
-func printSimpleStats(stats *Stats) {
-	fmt.Println(strings.Repeat("=", 60))
-	fmt.Println("LOAD TEST RESULTS")
-	fmt.Println(strings.Repeat("=", 60))
-	fmt.Printf("Total Requests: %d\n", stats.TotalRequests)
-	fmt.Printf("Successful: %d (%.2f%%)\n", stats.SuccessfulReqs,
-		float64(stats.SuccessfulReqs)/float64(stats.TotalRequests)*100)
-	fmt.Printf("Failed: %d (%.2f%%)\n", stats.FailedReqs,
-		float64(stats.FailedReqs)/float64(stats.TotalRequests)*100)
-	fmt.Printf("Total Time: %v\n", stats.TotalTime.Truncate(time.Millisecond))
-	fmt.Printf("Requests/sec: %.2f\n", stats.RequestsPerSec)
-	fmt.Printf("Data Transfer: %.2f MB\n", float64(stats.TotalBytes)/(1024*1024))
-
-	fmt.Println(strings.Repeat("-", 40))
-	fmt.Println("RESPONSE TIMES")
-	fmt.Println(strings.Repeat("-", 40))
-	fmt.Printf("Min: %v\n", stats.MinResponseTime.Truncate(time.Microsecond))
-	fmt.Printf("Max: %v\n", stats.MaxResponseTime.Truncate(time.Microsecond))
-	fmt.Printf("Avg: %v\n", stats.AvgResponseTime.Truncate(time.Microsecond))
-
-	if len(stats.Percentiles) > 0 {
-		fmt.Printf("50th percentile: %v\n", stats.Percentiles[50].Truncate(time.Microsecond))
-		fmt.Printf("90th percentile: %v\n", stats.Percentiles[90].Truncate(time.Microsecond))
-		fmt.Printf("95th percentile: %v\n", stats.Percentiles[95].Truncate(time.Microsecond))
-		fmt.Printf("99th percentile: %v\n", stats.Percentiles[99].Truncate(time.Microsecond))
+func main() {
+	var rootCmd = &cobra.Command{
+		Use:   "brutal [URL]",
+		Short: "Brutal - A powerful HTTP load testing tool",
+		Long: `Brutal is a blazingly fast HTTP load testing tool with comprehensive analytics.
+It provides detailed statistics, percentile analysis, and supports various HTTP methods.`,
+		Example: `  brutal https://api.example.com
+  brutal https://api.example.com -n 1000 -c 50
+  brutal https://api.example.com -method POST -body '{"test": "data"}'`,
+		RunE: runLoadTest,
+		Args: cobra.MaximumNArgs(1),
 	}
 
-	if len(stats.StatusCodes) > 0 {
-		fmt.Println(strings.Repeat("-", 40))
-		fmt.Println("STATUS CODES")
-		fmt.Println(strings.Repeat("-", 40))
-		for code, count := range stats.StatusCodes {
-			percentage := float64(count) / float64(stats.TotalRequests) * 100
-			if code == 0 {
-				fmt.Printf("Errors: %d (%.1f%%)\n", count, percentage)
-			} else {
-				fmt.Printf("%d: %d (%.1f%%)\n", code, count, percentage)
+	// Add flags
+	rootCmd.Flags().StringVarP(&url, "url", "u", "", "Target URL to test")
+	rootCmd.Flags().StringVarP(&method, "method", "X", "GET", "HTTP method")
+	rootCmd.Flags().StringVarP(&headers, "headers", "H", "", "Headers in JSON format")
+	rootCmd.Flags().StringVarP(&body, "body", "d", "", "Request body")
+	rootCmd.Flags().IntVarP(&concurrent, "concurrent", "c", 10, "Number of concurrent requests")
+	rootCmd.Flags().IntVarP(&requests, "requests", "n", 100, "Total number of requests")
+	rootCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Request timeout")
+	rootCmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification")
+	rootCmd.Flags().StringVarP(&output, "output", "o", "", "Output file for JSON results")
+
+	// Add persistent flags
+	rootCmd.PersistentFlags().BoolVarP(&noBanner, "no-banner", "", false, "Disable ASCII art banner")
+
+	// Add version command
+	var versionCmd = &cobra.Command{
+		Use:   "version",
+		Short: "Print the version number of Brutal",
+		Run: func(cmd *cobra.Command, args []string) {
+			if !noBanner {
+				printBanner()
 			}
-		}
+			fmt.Printf("Brutal Load Tester v%s\n", version)
+			fmt.Printf("Built with Go %s\n", "1.23+")
+			fmt.Printf("Powered by Cobra CLI Framework\n")
+			fmt.Println()
+		},
 	}
-	fmt.Println(strings.Repeat("=", 60))
+	rootCmd.AddCommand(versionCmd)
+
+	// Add completion command
+	var completionCmd = &cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate completion script",
+		Long: `To load completions:
+
+Bash:
+  $ source <(brutal completion bash)
+
+  # To load completions for each session, execute once:
+  # Linux:
+  $ brutal completion bash > /etc/bash_completion.d/brutal
+  # macOS:
+  $ brutal completion bash > /usr/local/etc/bash_completion.d/brutal
+
+Zsh:
+  # If shell completion is not already enabled in your environment,
+  # you will need to enable it.  You can execute the following once:
+  $ echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+  # To load completions for each session, execute once:
+  $ brutal completion zsh > "${fpath[1]}/_brutal"
+
+  # You will need to start a new shell for this setup to take effect.
+
+fish:
+  $ brutal completion fish | source
+
+  # To load completions for each session, execute once:
+  $ brutal completion fish > ~/.config/fish/completions/brutal.fish
+
+PowerShell:
+  PS> brutal completion powershell | Out-String | Invoke-Expression
+
+  # To load completions for every new session, run:
+  PS> brutal completion powershell > brutal.ps1
+  # and source this file from your PowerShell profile.
+`,
+		DisableFlagsInUseLine: true,
+		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
+		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
+		Run: func(cmd *cobra.Command, args []string) {
+			switch args[0] {
+			case "bash":
+				cmd.Root().GenBashCompletion(os.Stdout)
+			case "zsh":
+				cmd.Root().GenZshCompletion(os.Stdout)
+			case "fish":
+				cmd.Root().GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				cmd.Root().GenPowerShellCompletionWithDesc(os.Stdout)
+			}
+		},
+	}
+	rootCmd.AddCommand(completionCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
