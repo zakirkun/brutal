@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -40,6 +41,7 @@ type Config struct {
 	Duration    time.Duration     `json:"duration"`
 	Timeout     time.Duration     `json:"timeout"`
 	InsecureTLS bool              `json:"insecure_tls"`
+	ProxyURL    string            `json:"proxy_url"`
 }
 
 // Result holds the result of a single request
@@ -77,7 +79,7 @@ type LoadTester struct {
 
 // Global variables for command flags
 var (
-	url        string
+	targetURL  string
 	method     string
 	headers    string
 	body       string
@@ -87,6 +89,7 @@ var (
 	insecure   bool
 	output     string
 	noBanner   bool
+	proxy      string
 	version    string = "dev"
 )
 
@@ -100,6 +103,16 @@ func NewLoadTester(config Config) *LoadTester {
 
 	if config.InsecureTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
+	// Configure proxy if provided
+	if config.ProxyURL != "" {
+		proxyURL, err := url.Parse(config.ProxyURL)
+		if err != nil {
+			log.Printf("Invalid proxy URL: %v", err)
+		} else {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
 	}
 
 	client := &http.Client{
@@ -358,22 +371,23 @@ func printBanner() {
 
 func runLoadTest(cmd *cobra.Command, args []string) error {
 
-	if url == "" && len(args) == 0 {
+	if targetURL == "" && len(args) == 0 {
 		return fmt.Errorf("URL is required")
 	}
 
 	// Use URL from args if not provided via flag
-	if url == "" && len(args) > 0 {
-		url = args[0]
+	if targetURL == "" && len(args) > 0 {
+		targetURL = args[0]
 	}
 
 	config := Config{
-		URL:         url,
+		URL:         targetURL,
 		Method:      strings.ToUpper(method),
 		Concurrent:  concurrent,
 		Requests:    requests,
 		Timeout:     timeout,
 		InsecureTLS: insecure,
+		ProxyURL:    proxy,
 		Headers:     make(map[string]string),
 	}
 
@@ -402,6 +416,9 @@ func runLoadTest(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Concurrent users: %d\n", config.Concurrent)
 	fmt.Printf("Total requests: %d\n", config.Requests)
 	fmt.Printf("Timeout: %v\n", config.Timeout)
+	if config.ProxyURL != "" {
+		fmt.Printf("Proxy: %s\n", config.ProxyURL)
+	}
 	fmt.Println(strings.Repeat("-", 50))
 
 	// Run the load test with progress callback
@@ -433,13 +450,14 @@ func main() {
 It provides detailed statistics, percentile analysis, and supports various HTTP methods.`,
 		Example: `  brutal https://api.example.com
   brutal https://api.example.com -n 1000 -c 50
-  brutal https://api.example.com -method POST -body '{"test": "data"}'`,
+  brutal https://api.example.com -method POST -body '{"test": "data"}'
+  brutal https://api.example.com -p http://proxy.example.com:8080`,
 		RunE: runLoadTest,
 		Args: cobra.MaximumNArgs(1),
 	}
 
 	// Add flags
-	rootCmd.Flags().StringVarP(&url, "url", "u", "", "Target URL to test")
+	rootCmd.Flags().StringVarP(&targetURL, "url", "u", "", "Target URL to test")
 	rootCmd.Flags().StringVarP(&method, "method", "X", "GET", "HTTP method")
 	rootCmd.Flags().StringVarP(&headers, "headers", "H", "", "Headers in JSON format")
 	rootCmd.Flags().StringVarP(&body, "body", "d", "", "Request body")
@@ -448,6 +466,7 @@ It provides detailed statistics, percentile analysis, and supports various HTTP 
 	rootCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Request timeout")
 	rootCmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification")
 	rootCmd.Flags().StringVarP(&output, "output", "o", "", "Output file for JSON results")
+	rootCmd.Flags().StringVarP(&proxy, "proxy", "p", "", "Proxy URL (e.g., http://proxy.example.com:8080)")
 
 	// Add persistent flags
 	rootCmd.PersistentFlags().BoolVarP(&noBanner, "no-banner", "", false, "Disable ASCII art banner")

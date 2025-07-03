@@ -139,6 +139,9 @@ brutal https://api.example.com -n 1000 -c 50 -t 10s
 
 # Custom configuration with long flags
 brutal https://api.example.com --requests 1000 --concurrent 50 --timeout 10s
+
+# With proxy support
+brutal https://api.example.com -n 100 -c 10 --proxy http://proxy.example.com:8080
 ```
 
 ### Advanced Examples
@@ -165,6 +168,24 @@ brutal https://api.example.com \
   --concurrent 100 \
   --timeout 30s \
   --output results.json
+```
+
+#### Proxy Testing
+```bash
+# HTTP proxy
+brutal https://api.example.com --proxy http://proxy.example.com:8080
+
+# SOCKS5 proxy
+brutal https://api.example.com --proxy socks5://proxy.example.com:1080
+
+# Authenticated proxy
+brutal https://api.example.com --proxy http://username:password@proxy.example.com:8080
+
+# Test through corporate proxy
+brutal https://httpbin.org/get \
+  --proxy http://corporate-proxy:3128 \
+  --requests 10 \
+  --concurrent 2
 ```
 
 #### Insecure HTTPS Testing
@@ -202,6 +223,7 @@ brutal help                      # Show help for any command
 | `-t`  | `--timeout`   | 30s     | Request timeout                       |
 | `-k`  | `--insecure`  | false   | Skip TLS certificate verification     |
 | `-o`  | `--output`    | -       | Output file for JSON results          |
+| `-p`  | `--proxy`     | -       | Proxy URL (http/https/socks5)         |
 |       | `--no-banner` | false   | Disable ASCII art banner              |
 | `-h`  | `--help`      | -       | Help for brutal                       |
 
@@ -219,6 +241,9 @@ brutal https://api.example.com -n 100 --concurrent 10 -t 5s --output results.jso
 # URL as flag vs argument
 brutal --url https://api.example.com -n 100
 brutal https://api.example.com -n 100
+
+# With proxy
+brutal https://api.example.com -n 100 --proxy http://proxy:8080
 
 # Disable banner for scripts/CI/CD
 brutal https://api.example.com -n 100 --no-banner
@@ -454,4 +479,21 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **🐛 Found a bug? [Open an issue](https://github.com/zakirkun/brutal/issues)**
 
-**💡 Have a feature request? [Start a discussion](https://github.com/zakirkun/brutal/discussions)** 
+**💡 Have a feature request? [Start a discussion](https://github.com/zakirkun/brutal/discussions)**
+
+### Network and Proxy Testing
+```bash
+# Test through different proxy types
+brutal https://httpbin.org/get --proxy http://proxy.example.com:8080
+brutal https://httpbin.org/get --proxy socks5://proxy.example.com:1080
+
+# Corporate network testing
+brutal https://internal-api.company.com \
+  --proxy http://corporate-proxy:3128 \
+  --insecure \
+  --requests 50
+
+# Compare direct vs proxy performance
+brutal https://api.example.com -n 100 -c 10
+brutal https://api.example.com -n 100 -c 10 --proxy http://proxy:8080
+``` 
