@@ -221,11 +221,17 @@ func (lt *LoadTester) calculateStats(totalTime time.Duration) *Stats {
 	var totalBytes int64
 
 	for _, result := range lt.results {
-		if result.Error == nil {
+		// Count as successful if no error and status code indicates success (2xx)
+		if result.Error == nil && result.StatusCode >= 200 && result.StatusCode < 300 {
 			stats.SuccessfulReqs++
-			totalBytes += result.ContentSize
 		} else {
 			stats.FailedReqs++
+		}
+
+		// Count data transfer for all responses that have content size (even failed requests)
+		// This includes 4xx, 5xx responses that often have error message bodies
+		if result.ContentSize > 0 {
+			totalBytes += result.ContentSize
 		}
 
 		responseTimes = append(responseTimes, result.ResponseTime)
@@ -295,7 +301,29 @@ func printStats(stats *Stats) {
 	fmt.Printf("Failed: %d (%.2f%%)\n", stats.FailedReqs, float64(stats.FailedReqs)/float64(stats.TotalRequests)*100)
 	fmt.Printf("Total Time: %v\n", stats.TotalTime)
 	fmt.Printf("Requests/sec: %.2f\n", stats.RequestsPerSec)
-	fmt.Printf("Data Transfer: %.2f MB\n", float64(stats.TotalBytes)/(1024*1024))
+
+	// Enhanced data transfer display
+	if stats.TotalBytes > 0 {
+		if stats.TotalBytes < 1024 {
+			fmt.Printf("Data Transfer: %d bytes", stats.TotalBytes)
+		} else if stats.TotalBytes < 1024*1024 {
+			fmt.Printf("Data Transfer: %.2f KB", float64(stats.TotalBytes)/1024)
+		} else {
+			fmt.Printf("Data Transfer: %.2f MB", float64(stats.TotalBytes)/(1024*1024))
+		}
+
+		// Show average bytes per request
+		avgBytes := float64(stats.TotalBytes) / float64(stats.TotalRequests)
+		if avgBytes < 1024 {
+			fmt.Printf(" (%.0f bytes/req)\n", avgBytes)
+		} else if avgBytes < 1024*1024 {
+			fmt.Printf(" (%.2f KB/req)\n", avgBytes/1024)
+		} else {
+			fmt.Printf(" (%.2f MB/req)\n", avgBytes/(1024*1024))
+		}
+	} else {
+		fmt.Printf("Data Transfer: 0 bytes\n")
+	}
 
 	fmt.Println(strings.Repeat("-", 40))
 	fmt.Println("RESPONSE TIMES")
